@@ -1,0 +1,91 @@
+name: transaction-compliance-engine
+
+x-app-common: &app-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  environment:
+    DATABASE_URL: postgresql+psycopg2://compliance:compliance@db:5432/compliance
+    REDIS_URL: redis://redis:6379/0
+    AUTO_CREATE_TABLES: "true"
+    LOG_LEVEL: INFO
+    VELOCITY_WINDOW_SECONDS: "300"
+    VELOCITY_MAX_TRANSACTIONS: "3"
+    HIGH_RISK_COUNTRIES: KP,IR,SY,CU,SD,MM,BY
+    LARGE_TRANSACTION_THRESHOLD_USD: "10000"
+    CELERY_WORKER_POOL: prefork
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: compliance
+      POSTGRES_PASSWORD: compliance
+      POSTGRES_DB: compliance
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U compliance -d compliance"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    <<: *app-common
+    command:
+      ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live').read()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    <<: *app-common
+    command:
+      [
+        "celery",
+        "-A",
+        "app.core.celery_app",
+        "worker",
+        "--loglevel=INFO",
+        "--concurrency=2",
+      ]
+
+  beat:
+    <<: *app-common
+    command:
+      ["celery", "-A", "app.core.celery_app", "beat", "--loglevel=INFO"]
+
+volumes:
+  postgres_data:
+  redis_data:
